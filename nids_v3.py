@@ -46,7 +46,7 @@ except ImportError:
     print("📊 Plotting libraries not found. Install with: pip install pandas matplotlib seaborn")
 
 class FriendlyNIDS:
-    """Enhanced Network IDS with Detailed IP/Port Monitoring - No drivers required!"""
+    """Enhanced Network IDS with IP/Port Monitoring - Easy Start-Up"""
     
     def __init__(self):
         """Initialize the enhanced NIDS"""
@@ -210,7 +210,7 @@ class FriendlyNIDS:
         header_frame.pack(fill='x', padx=10, pady=5)
         header_frame.pack_propagate(False)
         
-        title_label = ttk.Label(header_frame, text="🛡️ Network Connection Monitor & IDS", style='Title.TLabel')
+        title_label = ttk.Label(header_frame, text="🛡️ Network IDS", style='Title.TLabel')
         title_label.pack(pady=15)
         
         subtitle_label = ttk.Label(header_frame, text="Real-time IP & Port Monitoring • Connection Analysis • Security Detection", style='Status.TLabel')
