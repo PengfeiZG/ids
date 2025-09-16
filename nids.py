@@ -3,6 +3,7 @@ Network Intrusion Detection System (NIDS)
 Student Final Semester Project
 Features: Packet capture, threat detection, GUI interface, AI-powered summaries
 Enhanced: Statistics now reflect applied filters
+Fixed: Scrollbar maintains position during live capture
 """
 
 import tkinter as tk
@@ -232,6 +233,10 @@ class NetworkMonitorGUI:
         # Track active filters
         self.filters_active = False
         
+        # Track user scroll state
+        self.user_scrolling = False
+        self.auto_scroll = True
+        
         # Setup GUI
         self.setup_gui()
         
@@ -373,29 +378,94 @@ class NetworkMonitorGUI:
             row=0, column=5, padx=10, pady=5
         )
         
+        # Auto-scroll toggle button
+        self.auto_scroll_btn = ttk.Button(filter_frame, text="Auto-scroll: ON", 
+                                         command=self.toggle_auto_scroll)
+        self.auto_scroll_btn.grid(row=0, column=6, padx=10, pady=5)
+        
         # Filter status
         self.filter_info_label = ttk.Label(filter_frame, text="No filters active", 
                                           font=('Arial', 9, 'italic'), foreground='gray')
         self.filter_info_label.grid(row=1, column=0, columnspan=6, pady=5)
         
+        # Scroll status label
+        self.scroll_status_label = ttk.Label(filter_frame, text="", 
+                                            font=('Arial', 9, 'italic'), foreground='blue')
+        self.scroll_status_label.grid(row=1, column=6, pady=5)
+        
         # Packet display
         packet_frame = ttk.LabelFrame(self.monitor_frame, text="Live Packet Capture", padding=10)
         packet_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
+        # Create frame for treeview and scrollbar
+        tree_frame = ttk.Frame(packet_frame)
+        tree_frame.pack(fill='both', expand=True)
+        
         # Create treeview for packets
         columns = ('Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info')
-        self.packet_tree = ttk.Treeview(packet_frame, columns=columns, show='headings', height=20)
+        self.packet_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=20)
         
         for col in columns:
             self.packet_tree.heading(col, text=col)
             self.packet_tree.column(col, width=150)
         
         # Scrollbar
-        scrollbar = ttk.Scrollbar(packet_frame, orient='vertical', command=self.packet_tree.yview)
-        self.packet_tree.configure(yscrollcommand=scrollbar.set)
+        self.packet_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=self.packet_tree.yview)
+        self.packet_tree.configure(yscrollcommand=self.on_packet_scroll)
         
         self.packet_tree.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
+        self.packet_scrollbar.pack(side='right', fill='y')
+        
+        # Bind mouse wheel events to detect user scrolling
+        self.packet_tree.bind("<MouseWheel>", self.on_mouse_scroll)
+        self.packet_tree.bind("<Button-4>", self.on_mouse_scroll)  # Linux
+        self.packet_tree.bind("<Button-5>", self.on_mouse_scroll)  # Linux
+    
+    def on_packet_scroll(self, first, last):
+        """Handle scrollbar movement"""
+        self.packet_scrollbar.set(first, last)
+        
+        # Check if we're at the top (showing latest packets)
+        if self.auto_scroll and float(first) == 0.0:
+            self.user_scrolling = False
+            self.scroll_status_label.config(text="")
+        else:
+            self.user_scrolling = True
+            if self.monitoring:
+                self.scroll_status_label.config(text="Paused (scrolling)")
+    
+    def on_mouse_scroll(self, event):
+        """Detect when user is actively scrolling"""
+        if self.monitoring and self.auto_scroll:
+            self.user_scrolling = True
+            self.scroll_status_label.config(text="Paused (scrolling)")
+            # Set a timer to re-enable auto-scroll if user stops scrolling
+            self.root.after(3000, self.check_scroll_position)
+    
+    def check_scroll_position(self):
+        """Check if user has scrolled back to top"""
+        if self.auto_scroll:
+            try:
+                # Get the current position
+                if self.packet_tree.yview()[0] == 0.0:
+                    self.user_scrolling = False
+                    self.scroll_status_label.config(text="")
+            except:
+                pass
+    
+    def toggle_auto_scroll(self):
+        """Toggle auto-scroll functionality"""
+        self.auto_scroll = not self.auto_scroll
+        if self.auto_scroll:
+            self.auto_scroll_btn.config(text="Auto-scroll: ON")
+            self.user_scrolling = False
+            self.scroll_status_label.config(text="")
+            # Scroll to top to show latest packets
+            if len(self.packet_tree.get_children()) > 0:
+                self.packet_tree.see(self.packet_tree.get_children()[0])
+        else:
+            self.auto_scroll_btn.config(text="Auto-scroll: OFF")
+            self.scroll_status_label.config(text="Manual scroll mode")
     
     def setup_alerts(self):
         """Setup security alerts view"""
@@ -679,7 +749,7 @@ class NetworkMonitorGUI:
         return threat_source == src_filter
     
     def display_packet(self, packet):
-        """Display packet in the monitor view"""
+        """Display packet in the monitor view with improved scrolling"""
         try:
             timestamp = datetime.now().strftime('%H:%M:%S')
             src = dst = protocol = info = "Unknown"
@@ -843,16 +913,24 @@ class NetworkMonitorGUI:
                 dst = "N/A"
                 info = f"Raw packet, {len(packet)} bytes"
             
-            # Add to treeview
-            self.packet_tree.insert('', 0, values=(timestamp, src, dst, protocol, length, info))
+            # Add packet to treeview
+            new_item = self.packet_tree.insert('', 0, values=(timestamp, src, dst, protocol, length, info))
             
-            # Limit displayed packets
-            if len(self.packet_tree.get_children()) > 100:
-                self.packet_tree.delete(self.packet_tree.get_children()[-1])
+            # Auto-scroll to top only if not user scrolling and auto-scroll is enabled
+            if self.auto_scroll and not self.user_scrolling:
+                self.packet_tree.see(new_item)
+            
+            # Limit displayed packets to prevent memory issues
+            children = self.packet_tree.get_children()
+            if len(children) > 500:  # Increased limit for better history
+                # Delete oldest packets (at the bottom)
+                for item in children[500:]:
+                    self.packet_tree.delete(item)
+                    
         except Exception as e:
             # If all else fails, still display something
             timestamp = datetime.now().strftime('%H:%M:%S')
-            self.packet_tree.insert('', 0, values=(
+            new_item = self.packet_tree.insert('', 0, values=(
                 timestamp, 
                 "Error", 
                 "Error", 
@@ -860,6 +938,10 @@ class NetworkMonitorGUI:
                 "0", 
                 f"Parse error: {str(e)[:50]}"
             ))
+            
+            if self.auto_scroll and not self.user_scrolling:
+                self.packet_tree.see(new_item)
+            
             print(f"Error displaying packet: {e}")
     
     def display_alert(self, threat):
@@ -979,6 +1061,10 @@ class NetworkMonitorGUI:
         for item in self.packet_tree.get_children():
             self.packet_tree.delete(item)
         
+        # Reset scroll state
+        self.user_scrolling = False
+        self.scroll_status_label.config(text="")
+        
         messagebox.showinfo("Statistics", "All statistics have been reset")
     
     def clear_alerts(self):
@@ -1076,10 +1162,10 @@ class NetworkMonitorGUI:
 def main():
     """Main entry point"""
     print("""
-    ╔═══════════════════════════════════════════════════════╗
-    ║     Network Intrusion Detection System (NIDS)         ║
-    ║           With Filter-Aware Statistics                ║
-    ╚═══════════════════════════════════════════════════════╝
+    ╔════════════════════════════════════════════════════╗
+    ║     Network Intrusion Detection System (NIDS)      ║
+    ║     With Fixed Scrollbar & Auto-scroll Control     ║
+    ╚════════════════════════════════════════════════════╝
     """)
     
     # Check for root/admin privileges (recommended for packet capture)
