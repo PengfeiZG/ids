@@ -2,6 +2,7 @@
 Network Intrusion Detection System (NIDS)
 Student Final Semester Project
 Features: Packet capture, threat detection, GUI interface, AI-powered summaries
+Enhanced: Statistics now reflect applied filters
 """
 
 import tkinter as tk
@@ -15,6 +16,7 @@ import json
 import re
 import ipaddress
 from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
+from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6EchoRequest, ICMPv6EchoReply
 from openai import OpenAI
 from typing import Dict, List, Tuple
 import os
@@ -131,8 +133,6 @@ class ThreatDetector:
         self.threat_patterns['icmp_flood'].clear()
         self.threat_patterns['port_scan'].clear()
 
-from openai import OpenAI
-
 class AIAnalyzer:
     """Integrates with OpenAI API for intelligent threat analysis"""
 
@@ -165,7 +165,7 @@ Provide a concise executive summary including:
 Keep the response under 200 words and focus on actionable insights."""
 
             response = self.client.chat.completions.create(
-                model="gpt-4o-mini",  # latest small, fast model
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are a cybersecurity expert analyzing NIDS alerts."},
                     {"role": "user", "content": prompt}
@@ -219,8 +219,18 @@ class NetworkMonitorGUI:
         self.packet_queue = queue.Queue()
         self.alert_queue = queue.Queue()
         self.monitoring = False
-        self.packet_count = 0
-        self.threat_count = 0
+        
+        # Statistics counters - separate total and filtered
+        self.total_packet_count = 0
+        self.total_threat_count = 0
+        self.filtered_packet_count = 0
+        self.filtered_threat_count = 0
+        
+        # Protocol statistics
+        self.protocol_stats = defaultdict(int)
+        
+        # Track active filters
+        self.filters_active = False
         
         # Setup GUI
         self.setup_gui()
@@ -266,6 +276,10 @@ class NetworkMonitorGUI:
         stats_frame = ttk.LabelFrame(self.dashboard_frame, text="Network Statistics", padding=10)
         stats_frame.pack(fill='x', padx=10, pady=10)
         
+        # Filter status indicator
+        self.filter_status_label = ttk.Label(stats_frame, text="", font=('Arial', 10, 'italic'))
+        self.filter_status_label.grid(row=0, column=0, columnspan=4, pady=5)
+        
         # Create stat labels
         self.stats_labels = {}
         stats = [
@@ -277,11 +291,41 @@ class NetworkMonitorGUI:
         ]
         
         for i, (label, value) in enumerate(stats):
+            row = (i//2) + 1  # Start from row 1 due to filter status
             ttk.Label(stats_frame, text=f"{label}:", font=('Arial', 10, 'bold')).grid(
-                row=i//2, column=(i%2)*2, sticky='w', padx=10, pady=5
+                row=row, column=(i%2)*2, sticky='w', padx=10, pady=5
             )
             self.stats_labels[label] = ttk.Label(stats_frame, text=value, font=('Arial', 10))
-            self.stats_labels[label].grid(row=i//2, column=(i%2)*2+1, sticky='w', padx=10, pady=5)
+            self.stats_labels[label].grid(row=row, column=(i%2)*2+1, sticky='w', padx=10, pady=5)
+        
+        # Add total vs filtered stats display
+        total_frame = ttk.LabelFrame(self.dashboard_frame, text="Statistics Breakdown", padding=10)
+        total_frame.pack(fill='x', padx=10, pady=10)
+        
+        ttk.Label(total_frame, text="Total Packets:", font=('Arial', 10, 'bold')).grid(
+            row=0, column=0, sticky='w', padx=10, pady=5
+        )
+        self.total_packets_label = ttk.Label(total_frame, text="0", font=('Arial', 10))
+        self.total_packets_label.grid(row=0, column=1, sticky='w', padx=10, pady=5)
+        
+        ttk.Label(total_frame, text="Total Threats:", font=('Arial', 10, 'bold')).grid(
+            row=0, column=2, sticky='w', padx=10, pady=5
+        )
+        self.total_threats_label = ttk.Label(total_frame, text="0", font=('Arial', 10))
+        self.total_threats_label.grid(row=0, column=3, sticky='w', padx=10, pady=5)
+        
+        # Protocol breakdown frame
+        protocol_frame = ttk.LabelFrame(self.dashboard_frame, text="Protocol Distribution", padding=10)
+        protocol_frame.pack(fill='x', padx=10, pady=10)
+        
+        self.protocol_labels = {}
+        protocols = ['TCP', 'UDP', 'ICMP', 'ICMPv6', 'ARP', 'IPv6', 'Unknown']
+        for i, proto in enumerate(protocols):
+            ttk.Label(protocol_frame, text=f"{proto}:", font=('Arial', 9)).grid(
+                row=i//3, column=(i%3)*2, sticky='w', padx=10, pady=3
+            )
+            self.protocol_labels[proto] = ttk.Label(protocol_frame, text="0", font=('Arial', 9))
+            self.protocol_labels[proto].grid(row=i//3, column=(i%3)*2+1, sticky='w', padx=10, pady=3)
         
         # Control buttons
         control_frame = ttk.Frame(self.dashboard_frame)
@@ -295,6 +339,9 @@ class NetworkMonitorGUI:
                                    command=self.stop_monitoring, state='disabled', 
                                    style='Danger.TButton')
         self.stop_btn.pack(side='left', padx=5)
+        
+        ttk.Button(control_frame, text="Reset Statistics", 
+                  command=self.reset_statistics).pack(side='left', padx=5)
         
         # Threat summary
         threat_frame = ttk.LabelFrame(self.dashboard_frame, text="Recent Threat Summary", padding=10)
@@ -310,7 +357,7 @@ class NetworkMonitorGUI:
         filter_frame.pack(fill='x', padx=10, pady=10)
         
         ttk.Label(filter_frame, text="Protocol:").grid(row=0, column=0, padx=5, pady=5)
-        self.protocol_filter = ttk.Combobox(filter_frame, values=['All', 'TCP', 'UDP', 'ICMP', 'ARP'])
+        self.protocol_filter = ttk.Combobox(filter_frame, values=['All', 'TCP', 'UDP', 'ICMP', 'ICMPv6', 'ARP', 'IPv6'])
         self.protocol_filter.set('All')
         self.protocol_filter.grid(row=0, column=1, padx=5, pady=5)
         
@@ -321,6 +368,15 @@ class NetworkMonitorGUI:
         ttk.Button(filter_frame, text="Apply Filter", command=self.apply_filter).grid(
             row=0, column=4, padx=10, pady=5
         )
+        
+        ttk.Button(filter_frame, text="Clear Filter", command=self.clear_filter).grid(
+            row=0, column=5, padx=10, pady=5
+        )
+        
+        # Filter status
+        self.filter_info_label = ttk.Label(filter_frame, text="No filters active", 
+                                          font=('Arial', 9, 'italic'), foreground='gray')
+        self.filter_info_label.grid(row=1, column=0, columnspan=6, pady=5)
         
         # Packet display
         packet_frame = ttk.LabelFrame(self.monitor_frame, text="Live Packet Capture", padding=10)
@@ -449,6 +505,57 @@ class NetworkMonitorGUI:
         ttk.Button(self.settings_frame, text="Save Settings", 
                   command=self.save_settings).pack(pady=20)
     
+    def packet_matches_filter(self, packet):
+        """Check if packet matches current filters"""
+        proto_filter = self.protocol_filter.get()
+        src_filter = self.src_filter.get().strip()
+        
+        # If no filters are set, all packets match
+        if proto_filter == 'All' and not src_filter:
+            return True
+        
+        # Extract packet info
+        protocol = None
+        src = None
+        
+        if IP in packet:
+            src = packet[IP].src
+            if TCP in packet:
+                protocol = "TCP"
+            elif UDP in packet:
+                protocol = "UDP"
+            elif ICMP in packet:
+                protocol = "ICMP"
+        elif ARP in packet:
+            protocol = "ARP"
+            src = packet[ARP].psrc
+        else:
+            # Check for IPv6
+            try:
+                if IPv6 in packet:
+                    src = packet[IPv6].src
+                    # Check if filtering for specific protocol within IPv6
+                    if TCP in packet and proto_filter == "TCP":
+                        protocol = "TCP"
+                    elif UDP in packet and proto_filter == "UDP":
+                        protocol = "UDP"
+                    elif packet[IPv6].nh == 58 and proto_filter == "ICMPv6":
+                        protocol = "ICMPv6"
+                    else:
+                        protocol = "IPv6"
+            except:
+                pass
+        
+        # Check protocol filter
+        if proto_filter != 'All' and protocol != proto_filter:
+            return False
+        
+        # Check source IP filter (works for both IPv4 and IPv6)
+        if src_filter and src != src_filter:
+            return False
+        
+        return True
+    
     def start_monitoring(self):
         """Start packet capture"""
         self.monitoring = True
@@ -456,6 +563,9 @@ class NetworkMonitorGUI:
         self.stats_labels['Status'].config(text='Running', foreground='green')
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
+        
+        # Reset statistics when starting
+        self.reset_statistics()
         
         # Start packet capture in separate thread
         capture_thread = threading.Thread(target=self.capture_packets, daemon=True)
@@ -494,16 +604,63 @@ class NetworkMonitorGUI:
             try:
                 if not self.packet_queue.empty():
                     packet = self.packet_queue.get(timeout=0.1)
-                    self.packet_count += 1
                     
-                    # Display packet
-                    self.display_packet(packet)
+                    # Always increment total count
+                    self.total_packet_count += 1
                     
-                    # Analyze for threats
-                    threats = self.detector.analyze_packet(packet)
-                    for threat in threats:
-                        self.threat_count += 1
-                        self.display_alert(threat)
+                    # Track protocol statistics
+                    if IP in packet:
+                        if TCP in packet:
+                            self.protocol_stats['TCP'] += 1
+                        elif UDP in packet:
+                            self.protocol_stats['UDP'] += 1
+                        elif ICMP in packet:
+                            self.protocol_stats['ICMP'] += 1
+                        else:
+                            self.protocol_stats['Other IP'] += 1
+                    elif ARP in packet:
+                        self.protocol_stats['ARP'] += 1
+                    else:
+                        # Check for IPv6
+                        try:
+                            if IPv6 in packet:
+                                self.protocol_stats['IPv6'] += 1
+                                # Also track IPv6 encapsulated protocols
+                                if TCP in packet:
+                                    self.protocol_stats['TCP'] += 1
+                                elif UDP in packet:
+                                    self.protocol_stats['UDP'] += 1
+                                elif packet[IPv6].nh == 58:  # ICMPv6
+                                    self.protocol_stats['ICMPv6'] += 1
+                            else:
+                                self.protocol_stats['Unknown'] += 1
+                        except:
+                            self.protocol_stats['Unknown'] += 1
+                    
+                    # Check if packet matches filter
+                    matches_filter = self.packet_matches_filter(packet)
+                    
+                    if matches_filter:
+                        # Increment filtered count
+                        self.filtered_packet_count += 1
+                        
+                        # Display packet
+                        self.display_packet(packet)
+                        
+                        # Analyze for threats
+                        threats = self.detector.analyze_packet(packet)
+                        for threat in threats:
+                            self.total_threat_count += 1
+                            
+                            # Check if threat source matches filter
+                            threat_matches = self.check_threat_filter(threat)
+                            if threat_matches:
+                                self.filtered_threat_count += 1
+                                self.display_alert(threat)
+                    else:
+                        # Still analyze for threats even if not displayed
+                        threats = self.detector.analyze_packet(packet)
+                        self.total_threat_count += len(threats)
                 
                 time.sleep(0.01)
             except queue.Empty:
@@ -511,45 +668,180 @@ class NetworkMonitorGUI:
             except Exception as e:
                 print(f"Error processing packet: {e}")
     
+    def check_threat_filter(self, threat):
+        """Check if threat matches current filters"""
+        src_filter = self.src_filter.get().strip()
+        
+        if not src_filter:
+            return True
+        
+        threat_source = threat.get('source', '')
+        return threat_source == src_filter
+    
     def display_packet(self, packet):
         """Display packet in the monitor view"""
-
-        
         try:
             timestamp = datetime.now().strftime('%H:%M:%S')
-            src = dst = protocol = length = info = "N/A"
+            src = dst = protocol = info = "Unknown"
+            length = str(len(packet)) if packet else "0"
             
-            length = "0"
-            payload_len = "0"
-            
+            # Try to extract packet information based on layer
             if IP in packet:
                 src = packet[IP].src
                 dst = packet[IP].dst
-                length = str(len(packet))
                 
                 if TCP in packet:
                     protocol = "TCP"
-                    info = f"Port {packet[TCP].sport} → {packet[TCP].dport}"
+                    sport = packet[TCP].sport
+                    dport = packet[TCP].dport
+                    flags = packet[TCP].flags
+                    flag_str = ""
+                    if flags & 0x02: flag_str += "S"  # SYN
+                    if flags & 0x10: flag_str += "A"  # ACK
+                    if flags & 0x01: flag_str += "F"  # FIN
+                    if flags & 0x04: flag_str += "R"  # RST
+                    if flags & 0x08: flag_str += "P"  # PSH
+                    info = f"Port {sport} → {dport}"
+                    if flag_str:
+                        info += f" [{flag_str}]"
                 elif UDP in packet:
                     protocol = "UDP"
-                    info = f"Port {packet[UDP].sport} → {packet[UDP].dport}"
+                    sport = packet[UDP].sport
+                    dport = packet[UDP].dport
+                    info = f"Port {sport} → {dport}"
+                    # Add common UDP service names
+                    if dport == 53 or sport == 53:
+                        info += " (DNS)"
+                    elif dport == 67 or sport == 67 or dport == 68 or sport == 68:
+                        info += " (DHCP)"
+                    elif dport == 123 or sport == 123:
+                        info += " (NTP)"
                 elif ICMP in packet:
                     protocol = "ICMP"
-                    info = f"Type {packet[ICMP].type}"
+                    icmp_type = packet[ICMP].type
+                    icmp_code = packet[ICMP].code
+                    type_names = {
+                        0: "Echo Reply",
+                        3: "Dest Unreachable",
+                        8: "Echo Request",
+                        11: "Time Exceeded"
+                    }
+                    info = f"Type {icmp_type} ({type_names.get(icmp_type, 'Unknown')})"
+                else:
+                    # Other IP protocols
+                    protocol = f"IP/{packet[IP].proto}"
+                    info = f"Protocol {packet[IP].proto}"
+            
             elif ARP in packet:
                 protocol = "ARP"
-                src = packet[ARP].psrc
-                dst = packet[ARP].pdst
-                info = "ARP Request" if packet[ARP].op == 1 else "ARP Reply"
+                src = packet[ARP].psrc if packet[ARP].psrc else packet[ARP].hwsrc
+                dst = packet[ARP].pdst if packet[ARP].pdst else packet[ARP].hwdst
+                op = packet[ARP].op
+                if op == 1:
+                    info = f"Who has {packet[ARP].pdst}?"
+                elif op == 2:
+                    info = f"{packet[ARP].psrc} is at {packet[ARP].hwsrc}"
+                else:
+                    info = f"Operation {op}"
             
-            proto_filter = self.protocol_filter.get()
-            src_filter = self.src_filter.get().strip()
-
-            if proto_filter != "ALL" and protocol != proto_filter:
-                return
-            
-            if src_filter and src != src_filter:
-                return
+            elif hasattr(packet, 'haslayer'):
+                # Try to identify by Ethernet type
+                if packet.haslayer('Ethernet'):
+                    eth = packet['Ethernet']
+                    src = eth.src
+                    dst = eth.dst
+                    ether_type = eth.type
+                    
+                    # Common Ethernet types
+                    ether_types = {
+                        0x0800: "IPv4",
+                        0x0806: "ARP",
+                        0x86DD: "IPv6",
+                        0x8100: "VLAN",
+                        0x88CC: "LLDP",
+                        0x888E: "802.1X"
+                    }
+                    
+                    protocol = ether_types.get(ether_type, f"Ether/0x{ether_type:04x}")
+                    info = f"EtherType: 0x{ether_type:04x}"
+                    
+                    # Special handling for IPv6
+                    if ether_type == 0x86DD:
+                        try:
+                            from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6EchoRequest, ICMPv6EchoReply
+                            if IPv6 in packet:
+                                src = packet[IPv6].src
+                                dst = packet[IPv6].dst
+                                
+                                # Decode Next Header to actual protocol
+                                nh = packet[IPv6].nh
+                                next_headers = {
+                                    0: "Hop-by-Hop",
+                                    6: "TCP",
+                                    17: "UDP",
+                                    58: "ICMPv6",
+                                    43: "Routing",
+                                    44: "Fragment",
+                                    50: "ESP",
+                                    51: "AH",
+                                    59: "No Next",
+                                    60: "Dest Options"
+                                }
+                                
+                                proto_name = next_headers.get(nh, f"Protocol {nh}")
+                                
+                                # Get more specific info for common protocols
+                                if nh == 6 and TCP in packet:  # TCP
+                                    protocol = "IPv6/TCP"
+                                    sport = packet[TCP].sport
+                                    dport = packet[TCP].dport
+                                    flags = packet[TCP].flags
+                                    flag_str = ""
+                                    if flags & 0x02: flag_str += "S"  # SYN
+                                    if flags & 0x10: flag_str += "A"  # ACK
+                                    if flags & 0x01: flag_str += "F"  # FIN
+                                    if flags & 0x04: flag_str += "R"  # RST
+                                    if flags & 0x08: flag_str += "P"  # PSH
+                                    info = f"Port {sport} → {dport}"
+                                    if flag_str:
+                                        info += f" [{flag_str}]"
+                                elif nh == 17 and UDP in packet:  # UDP
+                                    protocol = "IPv6/UDP"
+                                    sport = packet[UDP].sport
+                                    dport = packet[UDP].dport
+                                    info = f"Port {sport} → {dport}"
+                                    # Add common UDP service names
+                                    if dport == 53 or sport == 53:
+                                        info += " (DNS)"
+                                    elif dport == 67 or sport == 67 or dport == 68 or sport == 68:
+                                        info += " (DHCP)"
+                                    elif dport == 123 or sport == 123:
+                                        info += " (NTP)"
+                                    elif dport == 547 or sport == 547 or dport == 546 or sport == 546:
+                                        info += " (DHCPv6)"
+                                elif nh == 58:  # ICMPv6
+                                    protocol = "ICMPv6"
+                                    if ICMPv6ND_NS in packet:
+                                        info = "Neighbor Solicitation"
+                                    elif ICMPv6ND_NA in packet:
+                                        info = "Neighbor Advertisement"
+                                    elif ICMPv6EchoRequest in packet:
+                                        info = "Echo Request (Ping6)"
+                                    elif ICMPv6EchoReply in packet:
+                                        info = "Echo Reply (Pong6)"
+                                    else:
+                                        info = f"Type {packet[IPv6].payload.type if hasattr(packet[IPv6].payload, 'type') else 'Unknown'}"
+                                else:
+                                    protocol = f"IPv6/{proto_name}"
+                                    info = proto_name
+                        except:
+                            pass
+            else:
+                # Completely unknown packet type
+                protocol = "RAW"
+                src = "N/A"
+                dst = "N/A"
+                info = f"Raw packet, {len(packet)} bytes"
             
             # Add to treeview
             self.packet_tree.insert('', 0, values=(timestamp, src, dst, protocol, length, info))
@@ -558,6 +850,16 @@ class NetworkMonitorGUI:
             if len(self.packet_tree.get_children()) > 100:
                 self.packet_tree.delete(self.packet_tree.get_children()[-1])
         except Exception as e:
+            # If all else fails, still display something
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.packet_tree.insert('', 0, values=(
+                timestamp, 
+                "Error", 
+                "Error", 
+                "Unknown", 
+                "0", 
+                f"Parse error: {str(e)[:50]}"
+            ))
             print(f"Error displaying packet: {e}")
     
     def display_alert(self, threat):
@@ -584,9 +886,25 @@ class NetworkMonitorGUI:
     def update_statistics(self):
         """Update dashboard statistics"""
         if self.monitoring:
-            # Update counters
-            self.stats_labels['Packets Captured'].config(text=str(self.packet_count))
-            self.stats_labels['Threats Detected'].config(text=str(self.threat_count))
+            # Update counters based on filter status
+            if self.filters_active:
+                self.stats_labels['Packets Captured'].config(text=f"{self.filtered_packet_count} (filtered)")
+                self.stats_labels['Threats Detected'].config(text=f"{self.filtered_threat_count} (filtered)")
+            else:
+                self.stats_labels['Packets Captured'].config(text=str(self.total_packet_count))
+                self.stats_labels['Threats Detected'].config(text=str(self.total_threat_count))
+            
+            # Update total statistics
+            self.total_packets_label.config(text=str(self.total_packet_count))
+            self.total_threats_label.config(text=str(self.total_threat_count))
+            
+            # Update protocol distribution
+            for proto in ['TCP', 'UDP', 'ICMP', 'ICMPv6', 'ARP', 'IPv6', 'Unknown']:
+                count = self.protocol_stats.get(proto, 0)
+                if proto == 'Unknown':
+                    # Include 'Other IP' and actual 'Unknown' in the Unknown category
+                    count += self.protocol_stats.get('Other IP', 0)
+                self.protocol_labels[proto].config(text=str(count))
             
             # Update uptime
             uptime = int(time.time() - self.start_time)
@@ -599,8 +917,69 @@ class NetworkMonitorGUI:
             self.root.after(1000, self.update_statistics)
     
     def apply_filter(self):
-        """Apply packet filters"""
-        messagebox.showinfo("Filter", "Packet filter applied")
+        """Apply packet filters and update statistics"""
+        proto_filter = self.protocol_filter.get()
+        src_filter = self.src_filter.get().strip()
+        
+        if proto_filter != 'All' or src_filter:
+            self.filters_active = True
+            filter_text = f"Active Filters: Protocol={proto_filter}"
+            if src_filter:
+                filter_text += f", Source IP={src_filter}"
+            
+            self.filter_info_label.config(text=filter_text, foreground='blue')
+            self.filter_status_label.config(text="📊 Statistics showing filtered data", foreground='blue')
+            
+            # Reset filtered counters to recount from existing data
+            self.filtered_packet_count = 0
+            self.filtered_threat_count = 0
+            
+            # Clear the packet display
+            for item in self.packet_tree.get_children():
+                self.packet_tree.delete(item)
+            
+            messagebox.showinfo("Filter", f"Filter applied: {filter_text}")
+        else:
+            messagebox.showinfo("Filter", "No filter criteria specified")
+    
+    def clear_filter(self):
+        """Clear all filters and show all statistics"""
+        self.protocol_filter.set('All')
+        self.src_filter.delete(0, tk.END)
+        self.filters_active = False
+        
+        self.filter_info_label.config(text="No filters active", foreground='gray')
+        self.filter_status_label.config(text="", foreground='black')
+        
+        # Reset filtered counts to match total
+        self.filtered_packet_count = self.total_packet_count
+        self.filtered_threat_count = self.total_threat_count
+        
+        messagebox.showinfo("Filter", "All filters cleared")
+    
+    def reset_statistics(self):
+        """Reset all statistics counters"""
+        self.total_packet_count = 0
+        self.total_threat_count = 0
+        self.filtered_packet_count = 0
+        self.filtered_threat_count = 0
+        self.protocol_stats.clear()
+        
+        # Update display
+        self.stats_labels['Packets Captured'].config(text='0')
+        self.stats_labels['Threats Detected'].config(text='0')
+        self.total_packets_label.config(text='0')
+        self.total_threats_label.config(text='0')
+        
+        # Reset protocol labels
+        for proto_label in self.protocol_labels.values():
+            proto_label.config(text='0')
+        
+        # Clear packet and alert displays
+        for item in self.packet_tree.get_children():
+            self.packet_tree.delete(item)
+        
+        messagebox.showinfo("Statistics", "All statistics have been reset")
     
     def clear_alerts(self):
         """Clear all alerts"""
@@ -608,7 +987,8 @@ class NetworkMonitorGUI:
             self.alert_tree.delete(item)
         self.threat_summary.delete('1.0', tk.END)
         self.detector.alerts.clear()
-        self.threat_count = 0
+        self.filtered_threat_count = 0
+        self.total_threat_count = 0
         messagebox.showinfo("Alerts", "All alerts cleared")
     
     def export_alerts(self):
@@ -698,7 +1078,7 @@ def main():
     print("""
     ╔═══════════════════════════════════════════════════════╗
     ║     Network Intrusion Detection System (NIDS)         ║
-    ║                                                       ║
+    ║           With Filter-Aware Statistics                ║
     ╚═══════════════════════════════════════════════════════╝
     """)
     
