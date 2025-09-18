@@ -5,7 +5,7 @@ Features: Packet capture, threat detection, GUI interface, AI-powered summaries
 Enhanced: Statistics now reflect applied filters
 Fixed: Scrollbar maintains position during live capture
 """
-
+import psutil
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
@@ -16,15 +16,16 @@ from collections import defaultdict
 import json
 import re
 import ipaddress
+from scapy.all import get_if_list
 from scapy.all import sniff, IP, TCP, UDP, ICMP, ARP
 from scapy.layers.inet6 import IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6EchoRequest, ICMPv6EchoReply
 from openai import OpenAI
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import os
 
 class ThreatDetector:
     """Analyzes network packets for potential security threats"""
-    
+
     def __init__(self):
         self.threat_patterns = {
             'port_scan': defaultdict(set),
@@ -39,100 +40,144 @@ class ThreatDetector:
         }
         self.time_windows = defaultdict(lambda: defaultdict(int))
         self.alerts = []
-    
-    def analyze_packet(self, packet):
-        """Analyze a single packet for threats"""
+        self.last_reset_time = time.time()
+
+        # Configurable thresholds
+        self.thresholds = {
+            'port_scan_limit': 5,
+            'syn_flood_limit': 100,
+            'icmp_flood_limit': 50,
+            'reset_interval': 60  # Reset counters every 60 seconds
+        }
+
+    def analyze_packet(self, packet, settings=None):
+        """Analyze a single packet for threats with settings support"""
         threats = []
-        
+
+        # Get settings or use defaults
+        if settings is None:
+            settings = {
+                'detect_port_scan': True,
+                'detect_flood': True,
+                'detect_payload': True,
+                'alert_threshold': 'MEDIUM'
+            }
+
+        # Auto-reset counters periodically
+        current_time = time.time()
+        if current_time - self.last_reset_time > self.thresholds['reset_interval']:
+            self.reset_counters()
+            self.last_reset_time = current_time
+
         if IP in packet:
             src_ip = packet[IP].src
             dst_ip = packet[IP].dst
-            
-            # Check for port scanning
-            if TCP in packet:
+
+            # Port scanning
+            if TCP in packet and settings['detect_port_scan']:
                 dst_port = packet[TCP].dport
                 flags = packet[TCP].flags
-                
-                # Detect SYN scanning
+
                 if flags == 2:  # SYN flag
                     self.threat_patterns['port_scan'][src_ip].add(dst_port)
-                    if len(self.threat_patterns['port_scan'][src_ip]) > 10:
-                        threats.append({
+                    if len(self.threat_patterns['port_scan'][src_ip]) > self.thresholds['port_scan_limit']:
+                        threat = {
                             'type': 'Port Scan',
                             'severity': 'HIGH',
                             'source': src_ip,
-                            'description': f'Potential port scan detected from {src_ip}'
-                        })
-                
-                # Detect SYN flood
-                if flags == 2:
+                            'description': f'Potential port scan detected from {src_ip} (> {self.thresholds["port_scan_limit"]} ports)'
+                        }
+                        if self._should_alert(threat['severity'], settings['alert_threshold']):
+                            threats.append(threat)
+
+                if flags == 2 and settings['detect_flood']:
                     self.threat_patterns['syn_flood'][dst_ip] += 1
-                    if self.threat_patterns['syn_flood'][dst_ip] > 100:
-                        threats.append({
+                    if self.threat_patterns['syn_flood'][dst_ip] > self.thresholds['syn_flood_limit']:
+                        threat = {
                             'type': 'SYN Flood',
                             'severity': 'CRITICAL',
                             'source': src_ip,
                             'target': dst_ip,
-                            'description': f'Potential SYN flood attack to {dst_ip}'
-                        })
-                
-                # Check suspicious ports
+                            'description': f'Potential SYN flood attack to {dst_ip} (> {self.thresholds["syn_flood_limit"]} SYN packets)'
+                        }
+                        if self._should_alert(threat['severity'], settings['alert_threshold']):
+                            threats.append(threat)
+
                 if dst_port in self.threat_patterns['suspicious_ports']:
-                    threats.append({
+                    threat = {
                         'type': 'Suspicious Port',
                         'severity': 'MEDIUM',
                         'source': src_ip,
                         'port': dst_port,
                         'description': f'Connection to suspicious port {dst_port}'
-                    })
-            
-            # Check for ICMP flood
-            if ICMP in packet:
+                    }
+                    if self._should_alert(threat['severity'], settings['alert_threshold']):
+                        threats.append(threat)
+
+            if ICMP in packet and settings['detect_flood']:
                 self.threat_patterns['icmp_flood'][src_ip] += 1
-                if self.threat_patterns['icmp_flood'][src_ip] > 50:
-                    threats.append({
+                if self.threat_patterns['icmp_flood'][src_ip] > self.thresholds['icmp_flood_limit']:
+                    threat = {
                         'type': 'ICMP Flood',
                         'severity': 'HIGH',
                         'source': src_ip,
-                        'description': f'Potential ICMP flood from {src_ip}'
-                    })
-            
-            # Check payload for malicious patterns
-            if hasattr(packet, 'load'):
+                        'description': f'Potential ICMP flood from {src_ip} (> {self.thresholds["icmp_flood_limit"]} packets)'
+                    }
+                    if self._should_alert(threat['severity'], settings['alert_threshold']):
+                        threats.append(threat)
+
+            if hasattr(packet, 'load') and settings['detect_payload']:
                 payload = bytes(packet.load)
                 for pattern in self.threat_patterns['malicious_patterns']:
                     if pattern in payload.lower():
-                        threats.append({
+                        threat = {
                             'type': 'Malicious Payload',
                             'severity': 'CRITICAL',
                             'source': src_ip,
                             'pattern': pattern.decode('utf-8', errors='ignore'),
-                            'description': f'Malicious pattern detected in payload'
-                        })
-        
-        # Check for ARP spoofing
+                            'description': 'Malicious pattern detected in payload'
+                        }
+                        if self._should_alert(threat['severity'], settings['alert_threshold']):
+                            threats.append(threat)
+
         if ARP in packet:
             if packet[ARP].op == 2:  # ARP reply
                 arp_src = packet[ARP].psrc
                 arp_mac = packet[ARP].hwsrc
                 if arp_src in self.threat_patterns['arp_spoof']:
                     if self.threat_patterns['arp_spoof'][arp_src] != arp_mac:
-                        threats.append({
+                        threat = {
                             'type': 'ARP Spoofing',
                             'severity': 'CRITICAL',
                             'source': arp_src,
                             'description': f'ARP spoofing detected for {arp_src}'
-                        })
+                        }
+                        if self._should_alert(threat['severity'], settings['alert_threshold']):
+                            threats.append(threat)
                 else:
                     self.threat_patterns['arp_spoof'][arp_src] = arp_mac
-        
+
         return threats
-    
+
+    def _should_alert(self, threat_severity, threshold):
+        severity_levels = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
+        return severity_levels.get(threat_severity, 0) >= severity_levels.get(threshold, 1)
+
     def reset_counters(self):
-        """Reset detection counters periodically"""
         self.threat_patterns['syn_flood'].clear()
         self.threat_patterns['icmp_flood'].clear()
         self.threat_patterns['port_scan'].clear()
+
+    def update_thresholds(self, port_scan_limit=None, syn_flood_limit=None, icmp_flood_limit=None, reset_interval=None):
+        if port_scan_limit is not None:
+            self.thresholds['port_scan_limit'] = port_scan_limit
+        if syn_flood_limit is not None:
+            self.thresholds['syn_flood_limit'] = syn_flood_limit
+        if icmp_flood_limit is not None:
+            self.thresholds['icmp_flood_limit'] = icmp_flood_limit
+        if reset_interval is not None:
+            self.thresholds['reset_interval'] = reset_interval
+
 
 class AIAnalyzer:
     """Integrates with OpenAI API for intelligent threat analysis"""
@@ -153,26 +198,29 @@ class AIAnalyzer:
             # Prepare threat data
             threat_summary = self._prepare_threat_data(threats)
 
-            prompt = f"""Analyze the following network security threats detected by a NIDS:
+            prompt = f"""
+            The security documentation landscape has dramatically changed with digital attacks the expanding attack surface. 
+            Traditional security documentation often fails because it's either too generic to be useful or too technical to be followed consistently by higher ups and stakeholders. 
+            Your supervisor needs to be notifed about the new alerts that has been captured by the Network Intrusion Detection System (NIDS).
+            Analyze the following network security threats detected by a NIDS:
 
-{threat_summary}
+            {threat_summary}
 
-Provide a concise executive summary including:
-1. Overall threat level assessment
-2. Most critical threats identified
-3. Recommended immediate actions
-4. Potential attack patterns observed
+            Provide a BLUF, next include the following after the bluf:
+            1. Overall threat level assessment
+            2. Most critical threats identified
+            3. Recommended immediate actions
+            4. Potential attack patterns observed
 
-Keep the response under 200 words and focus on actionable insights."""
+            Keep the response concise and focus on actionable insights."""
 
             response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[
-                    {"role": "system", "content": "You are a cybersecurity expert analyzing NIDS alerts."},
+                    {"role": "system", "content": "You are a Cybersecurity analyst who also has exerptise in network management and incident response."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=300,
-                temperature=0.3
+                temperature=1
             )
 
             return response.choices[0].message.content
@@ -237,6 +285,9 @@ class NetworkMonitorGUI:
         self.user_scrolling = False
         self.auto_scroll = True
         
+        self.alert_log = []
+        self.threat_summary = []
+
         # Setup GUI
         self.setup_gui()
         
@@ -533,18 +584,38 @@ class NetworkMonitorGUI:
         self.ai_output.pack(fill='both', expand=True)
     
     def setup_settings(self):
-        """Setup settings view"""
+        """Setup settings view with interface detection"""
         # Network interface settings
         iface_frame = ttk.LabelFrame(self.settings_frame, text="Network Interface", padding=10)
         iface_frame.pack(fill='x', padx=10, pady=10)
         
         ttk.Label(iface_frame, text="Interface:").grid(row=0, column=0, padx=5, pady=5)
-        self.interface_var = tk.StringVar(value='eth0')
-        ttk.Entry(iface_frame, textvariable=self.interface_var).grid(row=0, column=1, padx=5, pady=5)
         
-        ttk.Label(iface_frame, text="Packet Count Limit:").grid(row=1, column=0, padx=5, pady=5)
-        self.packet_limit = tk.IntVar(value=0)
-        ttk.Entry(iface_frame, textvariable=self.packet_limit).grid(row=1, column=1, padx=5, pady=5)
+        # Get available interfaces
+        available_interfaces = self.get_available_interfaces()
+        
+        self.interface_var = tk.StringVar()
+        self.interface_combo = ttk.Combobox(iface_frame, textvariable=self.interface_var, 
+                                            values=available_interfaces, width=30)
+        
+        # Set default interface (first available or 'eth0' if exists)
+        if available_interfaces:
+            if 'eth0' in available_interfaces:
+                self.interface_combo.set('eth0')
+            else:
+                self.interface_combo.set(available_interfaces[0])
+        else:
+            self.interface_combo.set('eth0')
+        
+        self.interface_combo.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Refresh interfaces button
+        ttk.Button(iface_frame, text="Refresh Interfaces", 
+                command=self.refresh_interfaces).grid(row=0, column=2, padx=5, pady=5)
+        
+        # Show interface details
+        self.interface_info = ttk.Label(iface_frame, text="", font=('Arial', 9, 'italic'))
+        self.interface_info.grid(row=1, column=0, columnspan=3, pady=5)
         
         # Detection settings
         detect_frame = ttk.LabelFrame(self.settings_frame, text="Detection Settings", padding=10)
@@ -552,15 +623,15 @@ class NetworkMonitorGUI:
         
         self.detect_port_scan = tk.BooleanVar(value=True)
         ttk.Checkbutton(detect_frame, text="Detect Port Scans", 
-                       variable=self.detect_port_scan).grid(row=0, column=0, sticky='w', padx=5, pady=5)
+                    variable=self.detect_port_scan).grid(row=0, column=0, sticky='w', padx=5, pady=5)
         
         self.detect_flood = tk.BooleanVar(value=True)
         ttk.Checkbutton(detect_frame, text="Detect Flood Attacks", 
-                       variable=self.detect_flood).grid(row=1, column=0, sticky='w', padx=5, pady=5)
+                    variable=self.detect_flood).grid(row=1, column=0, sticky='w', padx=5, pady=5)
         
         self.detect_payload = tk.BooleanVar(value=True)
         ttk.Checkbutton(detect_frame, text="Detect Malicious Payloads", 
-                       variable=self.detect_payload).grid(row=2, column=0, sticky='w', padx=5, pady=5)
+                    variable=self.detect_payload).grid(row=2, column=0, sticky='w', padx=5, pady=5)
         
         # Alert settings
         alert_frame = ttk.LabelFrame(self.settings_frame, text="Alert Settings", padding=10)
@@ -573,8 +644,84 @@ class NetworkMonitorGUI:
         
         # Save settings button
         ttk.Button(self.settings_frame, text="Save Settings", 
-                  command=self.save_settings).pack(pady=20)
+                command=self.save_settings).pack(pady=20)
+        
+        # Update interface info on startup
+        self.update_interface_info()
+
+    def get_available_interfaces(self):
+        """Get list of available network interfaces"""
+        interfaces = []
+        
+        try:
+            # Method 1: Use Scapy's get_if_list
+            interfaces = get_if_list()
+            
+            # Filter out loopback and unusable interfaces
+            interfaces = [iface for iface in interfaces 
+                        if iface != 'lo' and not iface.startswith('docker') 
+                        and not iface.startswith('veth')]
+        except:
+            pass
+        
+        # Method 2: If psutil is available, use it for more details
+        try:
+            import psutil
+            for iface, addrs in psutil.net_if_addrs().items():
+                if iface not in interfaces and iface != 'lo':
+                    interfaces.append(iface)
+        except:
+            pass
+        
+        # Common interface names as fallback
+        if not interfaces:
+            # Common Linux interfaces
+            interfaces = ['eth0', 'wlan0', 'wlp2s0', 'enp0s3', 'ens33']
+            # Common Windows interfaces
+            interfaces.extend(['Wi-Fi', 'Ethernet'])
+            # Common macOS interfaces  
+            interfaces.extend(['en0', 'en1'])
+        
+        return sorted(list(set(interfaces)))
     
+    def refresh_interfaces(self):
+        """Refresh the list of available interfaces"""
+        interfaces = self.get_available_interfaces()
+        self.interface_combo['values'] = interfaces
+        
+        # Show current interface info
+        self.update_interface_info()
+        
+        messagebox.showinfo("Interfaces", f"Found {len(interfaces)} interfaces:\n{', '.join(interfaces[:10])}")
+
+
+    def update_interface_info(self):
+        """Update interface information display"""
+        current_iface = self.interface_var.get()
+        
+        try:
+            import psutil
+            if current_iface in psutil.net_if_addrs():
+                addrs = psutil.net_if_addrs()[current_iface]
+                for addr in addrs:
+                    if addr.family == 2:  # AF_INET (IPv4)
+                        self.interface_info.config(
+                            text=f"Selected: {current_iface} - IP: {addr.address}",
+                            foreground='green'
+                        )
+                        return
+            
+            self.interface_info.config(
+                text=f"Selected: {current_iface}",
+                foreground='blue'
+            )
+        except:
+            self.interface_info.config(
+                text=f"Selected: {current_iface}",
+                foreground='blue'
+            )
+
+
     def packet_matches_filter(self, packet):
         """Check if packet matches current filters"""
         proto_filter = self.protocol_filter.get()
@@ -656,20 +803,50 @@ class NetworkMonitorGUI:
         messagebox.showinfo("NIDS", "Network monitoring stopped")
     
     def capture_packets(self):
-        """Capture network packets"""
+        """Capture network packets on the selected interface"""
         try:
+            # Get the selected interface
+            selected_interface = self.interface_var.get()
+            
+            if not selected_interface:
+                messagebox.showerror("Error", "No interface selected. Please select an interface in Settings.")
+                self.stop_monitoring()
+                return
+            
+            print(f"Starting capture on interface: {selected_interface}")
+            
             def packet_handler(packet):
                 if self.monitoring:
                     self.packet_queue.put(packet)
             
-            # Start sniffing
-            sniff(prn=packet_handler, store=0, 
-                 count=self.packet_limit.get() if self.packet_limit.get() > 0 else 0)
+            # Start sniffing on the SELECTED INTERFACE
+            try:
+                sniff(prn=packet_handler, store=0, count=0, iface=selected_interface)
+            except PermissionError:
+                error_msg = f"Permission denied on interface '{selected_interface}'.\n\n"
+                if os.name == 'posix':
+                    error_msg += "On Linux/macOS, try running with sudo:\nsudo python nids.py"
+                else:
+                    error_msg += "On Windows, run as Administrator."
+                messagebox.showerror("Permission Error", error_msg)
+                self.stop_monitoring()
+            except Exception as e:
+                if "No such device" in str(e) or "not found" in str(e).lower():
+                    available = self.get_available_interfaces()
+                    error_msg = f"Interface '{selected_interface}' not found.\n\n"
+                    error_msg += f"Available interfaces: {', '.join(available[:10])}\n\n"
+                    error_msg += "Please select a valid interface in Settings."
+                    messagebox.showerror("Interface Error", error_msg)
+                else:
+                    messagebox.showerror("Capture Error", f"Failed to capture on '{selected_interface}':\n{str(e)}")
+                self.stop_monitoring()
+                
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to capture packets: {str(e)}")
+            messagebox.showerror("Error", f"Failed to start capture: {str(e)}")
+            self.stop_monitoring()
     
     def process_packets(self):
-        """Process captured packets"""
+        """Process captured packets with settings support"""
         while True:
             try:
                 if not self.packet_queue.empty():
@@ -695,7 +872,6 @@ class NetworkMonitorGUI:
                         try:
                             if IPv6 in packet:
                                 self.protocol_stats['IPv6'] += 1
-                                # Also track IPv6 encapsulated protocols
                                 if TCP in packet:
                                     self.protocol_stats['TCP'] += 1
                                 elif UDP in packet:
@@ -707,6 +883,14 @@ class NetworkMonitorGUI:
                         except:
                             self.protocol_stats['Unknown'] += 1
                     
+                    # Prepare settings for analyzer - MOVED UP BEFORE USE
+                    detection_settings = {
+                        'detect_port_scan': self.detect_port_scan.get(),
+                        'detect_flood': self.detect_flood.get(),
+                        'detect_payload': self.detect_payload.get(),
+                        'alert_threshold': self.alert_threshold.get()
+                    }
+                    
                     # Check if packet matches filter
                     matches_filter = self.packet_matches_filter(packet)
                     
@@ -716,27 +900,29 @@ class NetworkMonitorGUI:
                         
                         # Display packet
                         self.display_packet(packet)
+                    
+                    # ALWAYS analyze for threats regardless of filter
+                    threats = self.detector.analyze_packet(packet, detection_settings)
+                    
+                    # Process each threat
+                    for threat in threats:
+                        self.total_threat_count += 1
                         
-                        # Analyze for threats
-                        threats = self.detector.analyze_packet(packet)
-                        for threat in threats:
-                            self.total_threat_count += 1
-                            
-                            # Check if threat source matches filter
-                            threat_matches = self.check_threat_filter(threat)
-                            if threat_matches:
-                                self.filtered_threat_count += 1
-                                self.display_alert(threat)
-                    else:
-                        # Still analyze for threats even if not displayed
-                        threats = self.detector.analyze_packet(packet)
-                        self.total_threat_count += len(threats)
+                        # ALWAYS display alerts in the alerts tab and summary
+                        # regardless of filter (important for security monitoring)
+                        self.display_alert(threat)
+                        
+                        # Check if threat matches filter for filtered count
+                        threat_matches = self.check_threat_filter(threat)
+                        if threat_matches:
+                            self.filtered_threat_count += 1
                 
                 time.sleep(0.01)
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Error processing packet: {e}")
+
     
     def check_threat_filter(self, threat):
         """Check if threat matches current filters"""
@@ -1134,21 +1320,41 @@ class NetworkMonitorGUI:
         messagebox.showinfo("Auto-Analyze", "Auto-analyze feature toggled")
     
     def save_settings(self):
-        """Save application settings"""
+        """Save application settings with threshold updates"""
         settings = {
-            'interface': self.interface_var.get(),
-            'packet_limit': self.packet_limit.get(),
+            'interface': self.interface_var.get(),  # Save the selected interface
             'detect_port_scan': self.detect_port_scan.get(),
             'detect_flood': self.detect_flood.get(),
             'detect_payload': self.detect_payload.get(),
             'alert_threshold': self.alert_threshold.get()
         }
         
+        # Update detector thresholds when saving
+        self.update_detection_thresholds()
+        
+        # Update interface info display
+        self.update_interface_info()
+        
         with open('nids_settings.json', 'w') as f:
             json.dump(settings, f, indent=2)
         
-        messagebox.showinfo("Settings", "Settings saved successfully")
+        messagebox.showinfo("Settings", f"Settings saved.\nInterface set to: {self.interface_var.get()}")
     
+    def update_detection_thresholds(self):
+        """Update detection thresholds based on GUI settings"""
+        # This method can be called when settings are saved
+        try:
+            # Get values from GUI (you'd need to add these Entry fields to settings)
+            # For now, using default values
+            self.detector.update_thresholds(
+                port_scan_limit=15,  # Could be from a GUI field
+                syn_flood_limit=100,  # Could be from a GUI field
+                icmp_flood_limit=50,  # Could be from a GUI field
+                reset_interval=60     # Could be from a GUI field
+            )
+        except Exception as e:
+            print(f"Error updating thresholds: {e}")
+        
     def run(self):
         """Run the GUI application"""
         # Configure styles
