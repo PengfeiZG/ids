@@ -1,7 +1,0 @@
-{
-  "interface": "Wi-Fi",
-  "detect_port_scan": true,
-  "detect_flood": true,
-  "detect_payload": true,
-  "alert_threshold": "MEDIUM"
-}

@@ -364,7 +364,7 @@ def main():
     print("\n" + "="*60)
     print("✨ Quick monitoring complete!")
     print("\nNext steps:")
-    print("1. Run the full GUI application: python nids_enhanced_monitoring.py")
+    print("1. Run the full GUI application: python nids.py")
     print("2. Review the generated report files")
     print("3. Configure settings for continuous monitoring")
     print("\n💡 Tips:")
