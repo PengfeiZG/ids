@@ -752,11 +752,11 @@ class NetworkMonitorGUI:
                 if IPv6 in packet:
                     src = packet[IPv6].src
                     # Check if filtering for specific protocol within IPv6
-                    if TCP in packet and proto_filter == "TCP":
+                    if TCP in packet:
                         protocol = "TCP"
-                    elif UDP in packet and proto_filter == "UDP":
+                    elif UDP in packet:
                         protocol = "UDP"
-                    elif packet[IPv6].nh == 58 and proto_filter == "ICMPv6":
+                    elif packet[IPv6].nh == 58:
                         protocol = "ICMPv6"
                     else:
                         protocol = "IPv6"
