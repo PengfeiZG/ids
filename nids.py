@@ -453,7 +453,7 @@ class NetworkMonitorGUI:
         tree_frame.pack(fill='both', expand=True)
         
         # Create treeview for packets
-        columns = ('Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info')
+        columns = ('Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info', 'Processes')
         self.packet_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=20)
         
         for col in columns:
@@ -486,12 +486,11 @@ class NetworkMonitorGUI:
                 self.scroll_status_label.config(text="Paused (scrolling)")
     
     def on_mouse_scroll(self, event):
-        """Detect when user is actively scrolling"""
         if self.monitoring and self.auto_scroll:
-            self.user_scrolling = True
-            self.scroll_status_label.config(text="Paused (scrolling)")
-            # Set a timer to re-enable auto-scroll if user stops scrolling
-            self.root.after(3000, self.check_scroll_position)
+            self.user_scrolling = False
+            self.auto_scroll_btn.config(text="Auto-scroll: OFF")
+            self.scroll_status_label.config(text="Manual scroll mode")
+            
     
     def check_scroll_position(self):
         """Check if user has scrolled back to top"""
@@ -794,11 +793,13 @@ class NetworkMonitorGUI:
         messagebox.showinfo("NIDS", "Network monitoring started")
     
     def stop_monitoring(self):
-        """Stop packet capture"""
         self.monitoring = False
         self.stats_labels['Status'].config(text='Stopped', foreground='red')
         self.start_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
+
+        with self.packet_queue.mutex:
+            self.packet_queue.queue.clear()
         
         messagebox.showinfo("NIDS", "Network monitoring stopped")
     
@@ -1099,12 +1100,47 @@ class NetworkMonitorGUI:
                 dst = "N/A"
                 info = f"Raw packet, {len(packet)} bytes"
             
+            process_name = "System/Kernel"
+            try:
+                if TCP in packet or UDP in packet:
+                    sport = packet[TCP].sport if TCP in packet else packet[UDP].sport
+                    dport = packet[TCP].dport if TCP in packet else packet[UDP].dport
+                    src_ip = packet[IP].src if IP in packet else None
+                    dst_ip = packet[IP].dst if IP in packet else None
+
+                    for conn in psutil.net_connections(kind='inet'):
+                        try:
+                            # Match local address
+                            if conn.laddr and conn.laddr.port == sport and (not src_ip or conn.laddr.ip == src_ip):
+                                if conn.pid:
+                                    p = psutil.Process(conn.pid)
+                                    process_name = f"{p.name()} (PID {conn.pid})"
+                                else:
+                                    process_name = "System/Kernel"
+                                break
+
+                            # Match remote address
+                            if conn.raddr and conn.raddr.port == dport and (not dst_ip or conn.raddr.ip == dst_ip):
+                                if conn.pid:
+                                    p = psutil.Process(conn.pid)
+                                    process_name = f"{p.name()} (PID {conn.pid})"
+                                else:
+                                    process_name = "System/Kernel"
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+            except Exception:
+                process_name = "Error"
+
+
             # Add packet to treeview
-            new_item = self.packet_tree.insert('', 0, values=(timestamp, src, dst, protocol, length, info))
+            new_item = self.packet_tree.insert('', 0, values=(timestamp, src, dst, protocol, length, info, process_name))
             
             # Auto-scroll to top only if not user scrolling and auto-scroll is enabled
-            if self.auto_scroll and not self.user_scrolling:
-                self.packet_tree.see(new_item)
+            if self.auto_scroll:
+                first, last = self.packet_tree.yview()
+                if first <= 0.001:
+                    self.packet_tree.see(new_item)
             
             # Limit displayed packets to prevent memory issues
             children = self.packet_tree.get_children()
