@@ -722,55 +722,90 @@ class NetworkMonitorGUI:
 
 
     def packet_matches_filter(self, packet):
-        """Check if packet matches current filters"""
+        """Check if packet matches current filters in a more intuitive way."""
+
         proto_filter = self.protocol_filter.get()
         src_filter = self.src_filter.get().strip()
-        
+
         # If no filters are set, all packets match
         if proto_filter == 'All' and not src_filter:
             return True
-        
-        # Extract packet info
-        protocol = None
+
+        # Classify packet by network- and transport-layer protocol
+        network_proto = None   # 'IPv4', 'IPv6', 'ARP', etc.
+        transport_proto = None # 'TCP', 'UDP', 'ICMP', 'ICMPv6', etc.
         src = None
-        
+
+        # IPv4
         if IP in packet:
+            network_proto = "IPv4"
             src = packet[IP].src
+
             if TCP in packet:
-                protocol = "TCP"
+                transport_proto = "TCP"
             elif UDP in packet:
-                protocol = "UDP"
+                transport_proto = "UDP"
             elif ICMP in packet:
-                protocol = "ICMP"
+                transport_proto = "ICMP"
+
+        # ARP
         elif ARP in packet:
-            protocol = "ARP"
-            src = packet[ARP].psrc
-        else:
-            # Check for IPv6
-            try:
-                if IPv6 in packet:
-                    src = packet[IPv6].src
-                    # Check if filtering for specific protocol within IPv6
-                    if TCP in packet:
-                        protocol = "TCP"
-                    elif UDP in packet:
-                        protocol = "UDP"
-                    elif packet[IPv6].nh == 58:
-                        protocol = "ICMPv6"
+            network_proto = "ARP"
+            src = packet[ARP].psrc if packet[ARP].psrc else packet[ARP].hwsrc
+
+        # IPv6
+        elif IPv6 in packet:
+            network_proto = "IPv6"
+            src = packet[IPv6].src
+
+            # Next header / inner protocol
+            if TCP in packet:
+                transport_proto = "TCP"
+            elif UDP in packet:
+                transport_proto = "UDP"
+            else:
+                # ICMPv6 and friends
+                try:
+                    if packet[IPv6].nh == 58:
+                        transport_proto = "ICMPv6"
                     else:
-                        protocol = "IPv6"
-            except:
-                pass
-        
-        # Check protocol filter
-        if proto_filter != 'All' and protocol != proto_filter:
-            return False
-        
-        # Check source IP filter (works for both IPv4 and IPv6)
-        if src_filter and src != src_filter:
-            return False
-        
+                        # Unknown or extension header
+                        transport_proto = None
+                except Exception:
+                    transport_proto = None
+
+        # --- Protocol filter logic ---
+
+        if proto_filter != 'All':
+            match = False
+
+            if proto_filter == "TCP":
+                match = (transport_proto == "TCP")
+            elif proto_filter == "UDP":
+                # Match UDP on IPv4 or IPv6
+                match = (transport_proto == "UDP")
+            elif proto_filter == "ICMP":
+                match = (transport_proto == "ICMP")
+            elif proto_filter == "ICMPv6":
+                match = (transport_proto == "ICMPv6")
+            elif proto_filter == "ARP":
+                match = (network_proto == "ARP")
+            elif proto_filter == "IPv6":
+                # Any IPv6 packet, regardless of inner protocol
+                match = (network_proto == "IPv6")
+
+            if not match:
+                return False
+
+        # --- Source filter logic (IPv4 or IPv6) ---
+
+        if src_filter:
+            # Exact match on source address (IPv4 or IPv6)
+            if src != src_filter:
+                return False
+
         return True
+
     
     def start_monitoring(self):
         """Start packet capture"""
