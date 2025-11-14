@@ -2,7 +2,7 @@
 
 ## Overview
 
-This Network Intrusion Detection System (NIDS) is a comprehensive security monitoring tool that captures and analyzes network traffic in real-time. It features packet capture, threat detection, a graphical user interface, and AI-powered threat summaries. The #quickstart.py# will run a very simple NIDS within terminal for quick captures without a GUI. The #veryify_pkt_capture.py# will do a simple packet capture to test if packet capture works on your system.
+This Network Intrusion Detection System (NIDS) is a comprehensive security monitoring tool that captures and analyzes network traffic in real-time. It features packet capture, threat detection, a graphical user interface, and AI-powered threat summaries. The ##quickstart.py## will run a very simple NIDS within terminal for quick captures without a GUI. The ##veryify_pkt_capture.py## will do a simple packet capture to test if packet capture works on your system.
 
 ## Table of Contents
 1. [Features](#features)
